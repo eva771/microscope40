@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>Mobile Microscope — Camera • Zoom • Capture • Cell Counting</title>
+  <style>
+    :root{
+      --accent:#3b82f6;
+      --bg:#0b1220;
+      --panel:#111827;
+      --text:#e5e7eb;
+      --muted:#9ca3af;
+      --ok:#22c55e;
+      --warn:#f59e0b;
+      --err:#ef4444;
+    }
+    html,body{height:100%;}
+    body{
+      margin:0; font-family:system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+      background:var(--bg); color:var(--text);
+      -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+    }
+    .app{display:grid; grid-template-rows:auto 1fr auto; height:100vh;}
+    header{display:flex; align-items:center; gap:.75rem; padding:.75rem 1rem; background:var(--panel); border-bottom:1px solid #1f2937; position:sticky; top:0; z-index:5}
+    header h1{font-size:1.05rem; margin:0; font-weight:700}
+    header .badge{font-size:.8rem; color:var(--muted)}
+
+    .viewport{position:relative; height:100%; overflow:hidden; background:#000}
+    video, canvas#overlay{position:absolute; inset:0; width:100%; height:100%; object-fit:contain; touch-action:none;}
+
+    .toolbar{
+      position:absolute; inset:auto .5rem .5rem .5rem; display:flex; gap:.5rem; flex-wrap:wrap; z-index:6;
+      background:rgba(17,24,39,.85); backdrop-filter:saturate(150%) blur(8px);
+      padding:.5rem; border:1px solid #1f2937; border-radius:.75rem;
+    }
+    .toolbar > *{display:flex; align-items:center; gap:.5rem}
+    .toolbar button, .toolbar input[type="range"], .toolbar select, .toolbar input[type="number"]{
+      -webkit-appearance:none; appearance:none; border:none; outline:none;
+      padding:.5rem .65rem; border-radius:.6rem; background:#0b1220; color:var(--text);
+      border:1px solid #1f2937; font-size:.9rem;
+    }
+    .toolbar button{cursor:pointer}
+    .toolbar .primary{background:var(--accent); border-color:transparent; color:white;}
+    .toolbar .good{background:var(--ok); color:#04210f}
+    .toolbar .danger{background:var(--err)}
+
+    .row{display:flex; gap:.5rem; align-items:center}
+    label{font-size:.8rem; color:var(--muted)}
+    .count-badge{position:absolute; top:.5rem; right:.5rem; background:rgba(34,197,94,.2); color:#86efac; border:1px solid #14532d; padding:.25rem .5rem; border-radius:.5rem; font-weight:700; z-index:6}
+    .hint{position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); text-align:center; color:#94a3b8; opacity:.85; font-size:.95rem}
+    .toast{position:fixed; left:50%; bottom:1rem; transform:translateX(-50%); background:#111827; border:1px solid #1f2937; padding:.5rem .75rem; border-radius:.6rem; color:#e5e7eb; z-index:20;}
+    .hidden{display:none}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>📱🔬 Mobile Microscope</h1>
+      <span class="badge">Zoom • Capture • Cell Count (OpenCV.js)</span>
+    </header>
+
+    <div class="viewport" id="viewport">
+      <video id="video" playsinline muted></video>
+      <canvas id="overlay"></canvas>
+      <div class="hint" id="hint">Tap <b>Start Camera</b> → pinch to zoom → <b>Capture</b> → <b>Count</b>.<br/>Use back camera for best results.</div>
+      <div class="count-badge hidden" id="countBadge">Count: 0</div>
+
+      <div class="toolbar">
+        <div class="row">
+          <button id="btnStart" class="primary">▶ Start Camera</button>
+          <button id="btnSwitch">↺ Switch</button>
+          <button id="btnFlash">⚡ Flash</button>
+          <button id="btnCapture">📸 Capture</button>
+          <button id="btnDownload">⬇️ Save</button>
+        </div>
+        <div class="row">
+          <label for="zoom">Zoom</label>
+          <input id="zoom" type="range" min="1" max="6" value="1" step="0.01" />
+          <span id="zoomVal" aria-live="polite">1.0×</span>
+        </div>
+        <div class="row">
+          <label for="method">Count</label>
+          <select id="method">
+            <option value="contours">Contours</option>
+            <option value="hough">Hough Circles</option>
+          </select>
+          <label for="minArea">minA</label>
+          <input id="minArea" type="number" value="40" min="1" style="width:5rem" />
+          <label for="maxArea">maxA</label>
+          <input id="maxArea" type="number" value="5000" min="10" style="width:5rem" />
+          <label for="thresh">thr</label>
+          <input id="thresh" type="number" value="0" min="0" max="255" style="width:4rem" />
+          <button id="btnCount" class="good">🧮 Count</button>
+          <button id="btnClear">✖ Clear</button>
+        </div>
+      </div>
+    </div>
+
+    <footer style="padding:.5rem 1rem; color:var(--muted); background:var(--panel); border-top:1px solid #1f2937">
+      <small>Tips: ensure good lighting, keep sample flat, and focus manually by tapping the screen (if your browser shows focus ring).</small>
+    </footer>
+  </div>
+
+  <!-- OpenCV.js -->
+  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="opencvReady()"></script>
+
+  <script>
+  const els = {
+    video: document.getElementById('video'),
+    overlay: document.getElementById('overlay'),
+    start: document.getElementById('btnStart'),
+    switch: document.getElementById('btnSwitch'),
+    flash: document.getElementById('btnFlash'),
+    capture: document.getElementById('btnCapture'),
+    download: document.getElementById('btnDownload'),
+    zoom: document.getElementById('zoom'),
+    zoomVal: document.getElementById('zoomVal'),
+    hint: document.getElementById('hint'),
+    countBtn: document.getElementById('btnCount'),
+    clearBtn: document.getElementById('btnClear'),
+    method: document.getElementById('method'),
+    minArea: document.getElementById('minArea'),
+    maxArea: document.getElementById('maxArea'),
+    thresh: document.getElementById('thresh'),
+    countBadge: document.getElementById('countBadge')
+  };
+
+  let state = {
+    stream: null,
+    track: null,
+    imageCapture: null,
+    useBack: true,
+    torch: false,
+    hasZoomCapability: false,
+    maxOpticalZoom: 1,
+    baseZoom: 1, // optical zoom value when pinch starts
+    digitalZoom: 1, // CSS scale fallback
+    pinchStartDist: 0,
+    frameBitmap: null
+  };
+
+  function toast(msg){
+    const t = document.createElement('div');
+    t.className = 'toast'; t.textContent = msg; document.body.appendChild(t);
+    setTimeout(()=> t.remove(), 1800);
+  }
+
+  function sizeCanvases(){
+    const { video, overlay } = els;
+    const rect = video.getBoundingClientRect();
+    overlay.width = rect.width * window.devicePixelRatio;
+    overlay.height = rect.height * window.devicePixelRatio;
+    const ctx = overlay.getContext('2d');
+    ctx.setTransform(window.devicePixelRatio, 0, 0, window.devicePixelRatio, 0, 0);
+  }
+  window.addEventListener('resize', sizeCanvases);
+
+  async function startCamera(){
+    if(!navigator.mediaDevices?.getUserMedia){ toast('Camera not supported in this browser'); return; }
+    try{
+      if(state.stream){ state.stream.getTracks().forEach(t=>t.stop()); }
+      const constraints = {
+        video: {
+          facingMode: state.useBack? {ideal:'environment'} : {ideal:'user'},
+          width: { ideal: 1920 }, height: { ideal: 1080 },
+          focusMode: 'continuous'
+        },
+        audio: false
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      state.stream = stream;
+      els.video.srcObject = stream; await els.video.play();
+      state.track = stream.getVideoTracks()[0];
+      // ImageCapture (if supported)
+      try {
+        state.imageCapture = new ImageCapture(state.track);
+      } catch { state.imageCapture = null; }
+
+      // Capabilities (zoom/torch)
+      const caps = state.track.getCapabilities?.() || {};
+      state.hasZoomCapability = typeof caps.zoom === 'number' || (caps.zoom && caps.zoom.max);
+      state.maxOpticalZoom = caps?.zoom?.max || 1;
+      const settings = state.track.getSettings?.() || {};
+      els.zoom.max = state.hasZoomCapability ? (state.maxOpticalZoom || 6) : 6;
+      els.zoom.value = 1; state.digitalZoom = 1; state.baseZoom = settings.zoom || 1;
+      els.zoomVal.textContent = `${(settings.zoom || 1).toFixed(1)}×`;
+
+      // Torch availability
+      const canTorch = caps.torch === true;
+      els.flash.disabled = !canTorch;
+
+      sizeCanvases();
+      els.hint.classList.add('hidden');
+      toast('Camera ready');
+    }catch(err){
+      console.error(err);
+      toast('Camera error: ' + err.message);
+    }
+  }
+
+  async function applyZoom(z){
+    // Prefer optical zoom if supported
+    if(state.track && state.hasZoomCapability){
+      try{
+        await state.track.applyConstraints({ advanced: [{ zoom: z }] });
+        els.zoomVal.textContent = `${z.toFixed(1)}×`;
+      }catch(e){ console.warn('optical zoom failed, falling back to digital.', e); digitalZoom(z); }
+    } else {
+      digitalZoom(z);
+    }
+  }
+
+  function digitalZoom(z){
+    state.digitalZoom = Math.max(1, Math.min(6, z));
+    els.video.style.transformOrigin = 'center center';
+    els.video.style.transform = `scale(${state.digitalZoom})`;
+    els.zoomVal.textContent = `${state.digitalZoom.toFixed(1)}×`;
+  }
+
+  async function toggleTorch(){
+    try{
+      if(!state.track) return;
+      const caps = state.track.getCapabilities?.() || {};
+      if(!caps.torch) { toast('Torch not supported'); return; }
+      state.torch = !state.torch;
+      await state.track.applyConstraints({ advanced: [{ torch: state.torch }] });
+      toast(state.torch? 'Flash ON' : 'Flash OFF');
+    }catch(e){ toast('Torch failed'); }
+  }
+
+  async function captureFrame(){
+    const canvas = els.overlay; const ctx = canvas.getContext('2d');
+    // Clear overlay drawing before capture
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    // Draw current video frame onto overlay canvas in CSS pixels
+    const rect = els.video.getBoundingClientRect();
+    canvas.width = rect.width * devicePixelRatio; canvas.height = rect.height * devicePixelRatio;
+    ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+
+    if(state.imageCapture && state.track){
+      try{
+        const blob = await state.imageCapture.takePhoto();
+        const bmp = await createImageBitmap(blob);
+        ctx.drawImage(bmp, 0, 0, rect.width, rect.height);
+        state.frameBitmap = bmp; // keep for potential reuse
+        toast('Captured');
+        return;
+      }catch(e){ console.warn('ImageCapture failed, fallback to drawImage from video', e); }
+    }
+    // Fallback
+    ctx.drawImage(els.video, 0, 0, rect.width, rect.height);
+    toast('Captured');
+  }
+
+  function clearOverlay(){
+    const ctx = els.overlay.getContext('2d');
+    ctx.clearRect(0,0,els.overlay.width, els.overlay.height);
+    els.countBadge.classList.add('hidden');
+  }
+
+  // --- OpenCV integration ---
+  let cvReady = false;
+  function opencvReady(){
+    // Called when script tag loaded; real ready after runtime initialized
+    if (window.cv) {
+      cv['onRuntimeInitialized'] = () => {
+        cvReady = true; toast('OpenCV ready');
+      };
+    }
+  }
+
+  function countCells(){
+    if(!cvReady){ toast('OpenCV not ready yet'); return; }
+    const method = els.method.value; const minA = parseInt(els.minArea.value,10) || 1; const maxA = parseInt(els.maxArea.value,10) || 999999;
+
+    // Get pixels from overlay canvas (the last capture)
+    const canvas = els.overlay; const ctx = canvas.getContext('2d');
+    const { width:w, height:h } = canvas;
+    const imageData = ctx.getImageData(0,0,w,h);
+
+    // Build Mats
+    let src = cv.matFromImageData(imageData);
+    let gray = new cv.Mat(); let blur = new cv.Mat(); let binary = new cv.Mat();
+
+    // Preprocess
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, blur, new cv.Size(5,5), 0);
+
+    const thrInput = parseInt(els.thresh.value,10) || 0;
+    if(thrInput === 0){
+      cv.threshold(blur, binary, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+    } else {
+      cv.threshold(blur, binary, thrInput, 255, cv.THRESH_BINARY_INV);
+    }
+
+    // Morphology: open to remove noise, then close to join broken blobs
+    let kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3,3));
+    cv.morphologyEx(binary, binary, cv.MORPH_OPEN, kernel);
+    cv.morphologyEx(binary, binary, cv.MORPH_CLOSE, kernel);
+
+    const out = new cv.Mat(); cv.cvtColor(src, out, cv.COLOR_RGBA2RGB);
+
+    let count = 0;
+    if(method === 'hough'){
+      // Hough Circles (works best for well-isolated, round cells)
+      let circles = new cv.Mat();
+      let dp = 1; // inverse accumulator resolution
+      let minDist = Math.round(Math.min(w,h) / 32);
+      cv.HoughCircles(blur, circles, cv.HOUGH_GRADIENT, dp, minDist, 100, 20, 3, 80);
+      for (let i = 0; i < circles.cols; ++i) {
+        const x = circles.data32F[i*3]; const y = circles.data32F[i*3+1]; const r = circles.data32F[i*3+2];
+        const area = Math.PI * r * r; if(area < minA || area > maxA) continue;
+        cv.circle(out, new cv.Point(x,y), r, new cv.Scalar(34,197,94,255), 2);
+        count++;
+      }
+      circles.delete();
+    } else {
+      // Contours (robust for blobs; works even if not perfect circles)
+      let contours = new cv.MatVector(); let hierarchy = new cv.Mat();
+      cv.findContours(binary, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+      for(let i=0;i<contours.size();i++){
+        const c = contours.get(i);
+        const area = cv.contourArea(c);
+        if(area < minA || area > maxA) { c.delete(); continue; }
+        // Optional circularity filter
+        const peri = cv.arcLength(c, true);
+        const circ = (4*Math.PI*area)/(peri*peri + 1e-6);
+        if(circ < 0.2) { c.delete(); continue; }
+        // Draw min enclosing circle
+        const center = new cv.Point(0,0); const radius = new cv.IntPointer(0);
+        const moments = cv.moments(c,false);
+        const cx = moments.m10/(moments.m00+1e-5), cy = moments.m01/(moments.m00+1e-5);
+        let [x,y,r] = [cx,cy, Math.sqrt(area/Math.PI)];
+        cv.circle(out, new cv.Point(x,y), r, new cv.Scalar(34,197,94,255), 2);
+        count++; c.delete();
+      }
+      contours.delete(); hierarchy.delete();
+    }
+
+    // Render result
+    const resultCanvas = els.overlay; const rctx = resultCanvas.getContext('2d');
+    const resultImgData = new ImageData(new Uint8ClampedArray(out.data), out.cols, out.rows);
+    rctx.putImageData(resultImgData, 0, 0);
+
+    els.countBadge.textContent = `Count: ${count}`; els.countBadge.classList.remove('hidden');
+
+    // Cleanup
+    src.delete(); gray.delete(); blur.delete(); binary.delete(); kernel.delete(); out.delete();
+  }
+
+  // Pinch-to-zoom implementation
+  function distance(t1, t2){
+    const dx = t1.pageX - t2.pageX; const dy = t1.pageY - t2.pageY; return Math.hypot(dx, dy);
+  }
+  const viewport = document.getElementById('viewport');
+  viewport.addEventListener('touchstart', (e) => {
+    if(e.touches.length === 2){
+      state.pinchStartDist = distance(e.touches[0], e.touches[1]);
+      const current = parseFloat(els.zoom.value);
+      state.baseZoom = current;
+    }
+  }, {passive:true});
+  viewport.addEventListener('touchmove', (e) => {
+    if(e.touches.length === 2){
+      const d = distance(e.touches[0], e.touches[1]);
+      const scale = d / (state.pinchStartDist || d);
+      let z = (state.baseZoom || 1) * scale;
+      z = Math.min(parseFloat(els.zoom.max), Math.max(1, z));
+      els.zoom.value = z; applyZoom(z);
+      e.preventDefault();
+    }
+  }, {passive:false});
+
+  // UI wiring
+  els.start.onclick = startCamera;
+  els.switch.onclick = () => { state.useBack = !state.useBack; startCamera(); };
+  els.flash.onclick = toggleTorch;
+  els.zoom.oninput = (e) => applyZoom(parseFloat(e.target.value));
+  els.capture.onclick = captureFrame;
+  els.download.onclick = () => {
+    const url = els.overlay.toDataURL('image/png');
+    const a = document.createElement('a'); a.href = url; a.download = `microscope_${Date.now()}.png`; a.click();
+  };
+  els.countBtn.onclick = countCells;
+  els.clearBtn.onclick = clearOverlay;
+
+  // Some browsers block autoplay; show play on tap
+  els.video.addEventListener('click', () => { if(els.video.paused) els.video.play(); });
+  </script>
+</body>
+</html>
